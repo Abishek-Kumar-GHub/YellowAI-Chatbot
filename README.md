@@ -52,11 +52,8 @@ VITE_OPENROUTER_API_KEY=your_api_key_here
 
 **Important**: Replace `your_api_key_here` with your actual OpenRouter API key.
 
-### 5. Add the Application Code
 
-Replace the contents of `src/App.jsx` with the provided application code.
-
-### 6. Run the Application
+### 5. Run the Application
 
 ```bash
 # Development mode
@@ -65,7 +62,7 @@ npm run dev
 # The app will be available at http://localhost:5173
 ```
 
-### 7. Build for Production
+### 6. Build for Production
 
 ```bash
 # Create production build
@@ -111,15 +108,6 @@ npm run preview
 3. **Keep conversations focused** for better context
 4. **Logout** to clear session when done
 
-## Available AI Models
-
-| Model | Speed | Quality | Best For |
-|-------|-------|---------|----------|
-| Gemini 2.0 Flash | Very Fast | Excellent | General chat, customer support |
-| Llama 3.3 70B | Fast | Excellent | Complex reasoning, coding |
-| Gemini 1.5 Flash | Fast | Very Good | Quick queries |
-| Llama 3.2 3B | Very Fast | Good | Simple tasks |
-
 ## Troubleshooting
 
 ### "API key not configured" Error
@@ -141,7 +129,7 @@ npm run preview
 
 ### Slow Responses
 
-- Switch to Gemini 2.0 Flash model
+- Change to faster models’ API
 - Ensure streaming is working (you should see text appear word-by-word)
 - Check internet connection
 
