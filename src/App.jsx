@@ -1,12 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Plus, MessageSquare, User, Lock, Mail, FolderPlus, LogOut, Menu, X, Trash2 } from 'lucide-react';
+import { Send, Plus, MessageSquare, User, Lock, Mail, FolderPlus, LogOut, Menu, X, Trash2, StopCircle } from 'lucide-react';
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 // Use environment variables for API configuration
-const API_BASE = import.meta.env.VITE_API_BASE_URL;
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://openrouter.ai/api/v1';
 const API_KEY = import.meta.env.VITE_OPENROUTER_API_KEY;
-
 
 // Security utility functions
 const hashPassword = async (password) => {
@@ -41,6 +40,9 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [error, setError] = useState('');
   
+  // Streaming state - replaces both old loading and streaming
+  const [streamingContent, setStreamingContent] = useState('');
+  
   // Auth form states
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
@@ -51,13 +53,10 @@ export default function App() {
   // Project form states
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectPrompt, setNewProjectPrompt] = useState('');
-  const [showNewProject, setShowNewProject] = useState(false);  
-
-  const [streaming, setStreaming] = useState(false);
-  const [streamedContent, setStreamedContent] = useState('');
-
+  const [showNewProject, setShowNewProject] = useState(false);
   
   const messagesEndRef = useRef(null);
+  const abortControllerRef = useRef(null);
 
   // Initialize - check for existing session
   useEffect(() => {
@@ -79,7 +78,7 @@ export default function App() {
   // Auto-scroll to bottom of messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, streamingContent]);
 
   // Load user's projects
   const loadProjects = (userId) => {
@@ -149,6 +148,9 @@ export default function App() {
 
   // Handle logout
   const handleLogout = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
     sessionStorage.removeItem('authToken');
     setCurrentUser(null);
     setProjects([]);
@@ -190,7 +192,6 @@ export default function App() {
     localStorage.setItem('projects', JSON.stringify(filtered));
     setProjects(projects.filter(p => p.id !== projectId));
     
-    // Clear messages for this project
     localStorage.removeItem(`messages_${projectId}`);
     
     if (selectedProject?.id === projectId) {
@@ -206,11 +207,10 @@ export default function App() {
     setMessages(projectMessages);
   };
 
-  // Send message to AI
+  // OPTIMIZED: Real streaming from API - no fake animation
   const sendMessage = async () => {
     if (!input.trim() || !selectedProject) return;
     
-    // Check if API key is configured
     if (!API_KEY) {
       setError('API key not configured. Please add VITE_OPENROUTER_API_KEY to your .env file and restart the server.');
       return;
@@ -222,6 +222,10 @@ export default function App() {
     setInput('');
     setLoading(true);
     setError('');
+    setStreamingContent(''); // Clear previous streaming content
+    
+    // Create abort controller for cancellation
+    abortControllerRef.current = new AbortController();
     
     try {
       const response = await fetch(`${API_BASE}/chat/completions`, {
@@ -237,8 +241,10 @@ export default function App() {
           messages: [
             { role: 'system', content: selectedProject.systemPrompt },
             ...newMessages
-          ]
-        })
+          ],
+          stream: true // Enable real streaming from API
+        }),
+        signal: abortControllerRef.current.signal
       });
       
       if (!response.ok) {
@@ -255,49 +261,72 @@ export default function App() {
         throw new Error(errorData.error?.message || `API Error: ${response.status}`);
       }
       
-      const data = await response.json();
-      const assistantMessage = {
-        role: 'assistant',
-        content: data.choices[0].message.content
-      };
+      // Process real streaming response from API
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulatedContent = '';
       
-    const assistantText = data.choices[0].message.content;
-    const words = assistantText.split(' ');
-
-    setStreamedContent('');
-    setStreaming(true);
-
-    let i = 0;
-    const interval = setInterval(() => {
-      setStreamedContent(prev =>
-        prev + (i === 0 ? '' : ' ') + words[i]
-      );
-      i++;
-
-      if (i >= words.length) {
-        clearInterval(interval);
-        setStreaming(false);
-
+      // Read stream chunks as they arrive
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n').filter(line => line.trim() !== '');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') continue;
+            
+            try {
+              const parsed = JSON.parse(data);
+              const content = parsed.choices?.[0]?.delta?.content;
+              
+              if (content) {
+                accumulatedContent += content;
+                // Update UI in real-time as chunks arrive
+                setStreamingContent(accumulatedContent);
+              }
+            } catch (e) {
+              // Skip invalid JSON chunks
+            }
+          }
+        }
+      }
+      
+      // Save complete message after streaming finishes
+      if (accumulatedContent) {
         const assistantMessage = {
           role: 'assistant',
-          content: assistantText
+          content: accumulatedContent
         };
-
+        
         const updatedMessages = [...newMessages, assistantMessage];
         setMessages(updatedMessages);
-        localStorage.setItem(
-          `messages_${selectedProject.id}`,
-          JSON.stringify(updatedMessages)
-        );
-
-        setStreamedContent('');
+        localStorage.setItem(`messages_${selectedProject.id}`, JSON.stringify(updatedMessages));
       }
-    }, 120);
+      
+      // Clear streaming content after saving
+      setStreamingContent('');
+      
     } catch (err) {
-      setError(err.message || 'Failed to send message. Please check your connection and try again.');
+      if (err.name === 'AbortError') {
+        setError('Request cancelled');
+      } else {
+        setError(err.message || 'Failed to send message. Please check your connection and try again.');
+      }
       console.error('Chat error:', err);
     } finally {
       setLoading(false);
+      abortControllerRef.current = null;
+    }
+  };
+
+  // Cancel ongoing request
+  const cancelRequest = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
     }
   };
 
@@ -542,61 +571,68 @@ export default function App() {
 
               {/* Messages */}
               <div className="flex-1 overflow-y-auto p-6 space-y-4">
-                {messages.length === 0 ? (
+                {messages.length === 0 && !streamingContent ? (
                   <div className="flex items-center justify-center h-full">
                     <div className="text-center">
                       <MessageSquare className="w-16 h-16 text-gray-300 mx-auto mb-4" />
                       <p className="text-gray-500">Start a conversation with your agent</p>
+                      <p className="text-xs text-gray-400 mt-2">Responses stream in real-time</p>
                     </div>
                   </div>
                 ) : (
-                  messages.map((msg, idx) => (
-                    <div
-                      key={idx}
-                      className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                    >
+                  <>
+                    {messages.map((msg, idx) => (
                       <div
-                        className={`max-w-2xl px-4 py-3 rounded-lg ${
-                          msg.role === 'user'
-                            ? 'bg-black text-white'
-                            : 'bg-gray-100 text-black border-2 border-gray-200'
-                        }`}
+                        key={idx}
+                        className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
                       >
-                        {msg.role === 'assistant' ? (
+                        <div
+                          className={`max-w-2xl px-4 py-3 rounded-lg ${
+                            msg.role === 'user'
+                              ? 'bg-black text-white'
+                              : 'bg-gray-100 text-black border-2 border-gray-200'
+                          }`}
+                        >
+                          {msg.role === 'assistant' ? (
+                            <div className="prose prose-sm max-w-none leading-relaxed">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {msg.content}
+                              </ReactMarkdown>
+                            </div>
+                          ) : (
+                            <p className="whitespace-pre-wrap">{msg.content}</p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                    
+                    {/* Show streaming content in real-time */}
+                    {streamingContent && (
+                      <div className="flex justify-start">
+                        <div className="max-w-2xl px-4 py-3 rounded-lg bg-gray-100 text-black border-2 border-gray-200">
                           <div className="prose prose-sm max-w-none leading-relaxed">
                             <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {msg.content}
+                              {streamingContent}
                             </ReactMarkdown>
+                            <span className="inline-block w-1 h-4 bg-black animate-pulse ml-1"></span>
                           </div>
-                        ) : (
-                          <p className="whitespace-pre-wrap">{msg.content}</p>
-                        )}
+                        </div>
                       </div>
-                    </div>
-                  ))
-                )}
-                {streaming && (
-                  <div className="flex justify-start">
-                    <div className="max-w-2xl px-4 py-3 rounded-lg bg-gray-100 text-black border-2 border-gray-200">
-                      <div className="prose prose-sm max-w-none leading-relaxed">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {streamedContent}
-                        </ReactMarkdown>
+                    )}
+                    
+                    {/* Show loading dots only when waiting for first chunk */}
+                    {loading && !streamingContent && (
+                      <div className="flex justify-start">
+                        <div className="bg-gray-100 border-2 border-gray-200 px-4 py-3 rounded-lg">
+                          <div className="flex gap-2">
+                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  </div>
-                )}
-
-                {loading && (
-                  <div className="flex justify-start">
-                    <div className="bg-gray-100 border-2 border-gray-200 px-4 py-3 rounded-lg">
-                      <div className="flex gap-2">
-                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
-                      </div>
-                    </div>
-                  </div>
+                    )}
+                  </>
                 )}
                 <div ref={messagesEndRef} />
               </div>
@@ -618,13 +654,23 @@ export default function App() {
                     className="flex-1 px-4 py-3 border-2 border-black rounded-lg text-black placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black"
                     disabled={loading}
                   />
-                  <button
-                    onClick={sendMessage}
-                    disabled={loading || !input.trim()}
-                    className="px-6 py-3 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-semibold"
-                  >
-                    <Send className="w-5 h-5" />
-                  </button>
+                  {loading ? (
+                    <button
+                      onClick={cancelRequest}
+                      className="px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-semibold"
+                      title="Stop generation"
+                    >
+                      <StopCircle className="w-5 h-5" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={sendMessage}
+                      disabled={!input.trim()}
+                      className="px-6 py-3 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-semibold"
+                    >
+                      <Send className="w-5 h-5" />
+                    </button>
+                  )}
                 </div>
               </div>
             </>
